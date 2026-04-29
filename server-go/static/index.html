@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>😜 Emoji Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ═══ HOME SCREEN ═══ -->
+<div id="screen-home" class="screen active">
+    <div class="home-wrapper">
+        <div class="home-hero">
+            <div class="hero-emoji-ring">
+                <span class="orbit-emoji" style="--i:0">😀</span>
+                <span class="orbit-emoji" style="--i:1">🎉</span>
+                <span class="orbit-emoji" style="--i:2">💬</span>
+                <span class="orbit-emoji" style="--i:3">🔥</span>
+                <span class="orbit-emoji" style="--i:4">✨</span>
+                <span class="orbit-emoji" style="--i:5">💖</span>
+                <span class="orbit-emoji" style="--i:6">🚀</span>
+                <span class="orbit-emoji" style="--i:7">🌈</span>
+            </div>
+            <h1 class="home-title">Emoji Chat</h1>
+            <p class="home-subtitle">말은 필요 없어, 이모지면 충분해</p>
+        </div>
+
+        <div class="home-actions">
+            <button id="btn-create-room" class="btn btn-primary">
+                <span class="btn-emoji">🎊</span>
+                새 채팅방 만들기
+            </button>
+
+            <div class="divider">
+                <span>또는</span>
+            </div>
+
+            <div class="join-input-group">
+                <input type="text" id="input-room-id" placeholder="채팅방 ID를 붙여넣기..." class="input-field">
+                <button id="btn-join-room" class="btn btn-secondary">참여 🚪</button>
+            </div>
+        </div>
+
+        <div id="recent-rooms" class="recent-rooms" style="display:none">
+            <h3>최근 방문한 채팅방</h3>
+            <div id="recent-rooms-list" class="recent-rooms-list"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ ROOM SCREEN ═══ -->
+<div id="screen-room" class="screen">
+    <header class="room-header">
+        <button id="btn-back" class="btn-icon" title="홈으로">←</button>
+        <div class="room-info">
+            <h2 id="room-name" class="room-name">🎉</h2>
+            <span id="online-count" class="online-badge">🟢 1</span>
+        </div>
+        <div class="room-header-actions">
+            <button id="btn-qr" class="btn-icon" title="QR 코드">📱</button>
+            <button id="btn-delete-room" class="btn-icon btn-danger-icon" title="방 삭제" style="display:none">🗑️</button>
+        </div>
+    </header>
+
+    <div id="chat-messages" class="chat-messages">
+        <div id="load-more-area" class="load-more-area" style="display:none">
+            <button id="btn-load-more" class="btn btn-ghost">이전 메시지 불러오기 ⬆️</button>
+        </div>
+    </div>
+
+    <div class="chat-input-area">
+        <div id="emoji-error" class="emoji-error" style="display:none">이모지만 입력할 수 있어요! 🙅</div>
+        <div class="input-row">
+            <input type="text" id="input-message" class="input-message" placeholder="이모지를 입력하세요... 😀" autocomplete="off">
+            <button id="btn-send" class="btn btn-send">🚀</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ QR MODAL ═══ -->
+<div id="modal-qr" class="modal" style="display:none">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>📱 QR 코드로 초대하기</h3>
+            <button id="btn-close-qr" class="btn-icon">✕</button>
+        </div>
+        <div id="qr-code" class="qr-code-container"></div>
+        <p class="qr-hint">이 QR 코드를 스캔하면 채팅방에 참여할 수 있어요!</p>
+        <div class="qr-url-copy">
+            <input type="text" id="qr-url-display" class="input-field" readonly>
+            <button id="btn-copy-url" class="btn btn-secondary">복사 📋</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ CONNECTION STATUS ═══ -->
+<div id="connection-status" class="connection-status" style="display:none">
+    <span class="status-dot"></span>
+    <span class="status-text">연결 중...</span>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

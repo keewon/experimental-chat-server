@@ -1,0 +1,24 @@
+server:
+  port: ${PORT:8080}
+
+spring:
+  application:
+    name: emoji-chat
+  datasource:
+    # Profiles override these. Default is sqlite.
+    url: jdbc:sqlite:${SQLITE_PATH:emoji_chat.db}
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+  mvc:
+    static-path-pattern: /static/**
+  web:
+    resources:
+      static-locations: classpath:/static/
+
+emojichat:
+  db-type: ${DB_TYPE:sqlite}
+  mysql-dsn: ${MYSQL_DSN:jdbc:mysql://127.0.0.1:3306/emoji_chat?characterEncoding=utf8mb4&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true}
+  mysql-user: ${MYSQL_USER:root}
+  mysql-password: ${MYSQL_PASSWORD:}
+  room-idle-timeout-seconds: 3600

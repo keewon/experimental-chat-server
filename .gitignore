@@ -1,0 +1,46 @@
+# ─── Secrets / local config ──────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ─── SQLite (runtime DB + WAL sidecars) ──────────────────────
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# ─── OS / editor ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# ─── server-go ───────────────────────────────────────────────
+server-go/server-go
+server-go/emoji_chat
+server-go/emoji_chat.exe
+
+# ─── server-kotlin (Spring Boot / Gradle) ────────────────────
+server-kotlin/.gradle/
+server-kotlin/build/
+server-kotlin/out/
+server-kotlin/bin/
+server-kotlin/!gradle-wrapper.jar
+server-kotlin/.kotlin/
+
+# ─── server-elixir (Mix / Phoenix) ───────────────────────────
+server-elixir/_build/
+server-elixir/deps/
+server-elixir/*.ez
+server-elixir/erl_crash.dump
+server-elixir/.elixir_ls/
+server-elixir/cover/
+
+# ─── Logs ────────────────────────────────────────────────────
+*.log
+logs/
