@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -56,10 +59,12 @@ type WSMessage struct {
 }
 
 type Client struct {
-	roomHub *RoomHub
-	conn    *websocket.Conn
-	userID  string
-	send    chan []byte
+	roomHub     *RoomHub
+	conn        *websocket.Conn
+	userID      string
+	send        chan []byte
+	ip          string
+	connectedAt time.Time
 }
 
 // RoomHub — 방 하나를 담당하는 독립 Hub
@@ -255,6 +260,9 @@ func (c *Client) readPump() {
 	defer func() {
 		c.roomHub.unregister <- c
 		c.conn.Close()
+		log.Printf("[ws disconnect] room=%s user=%s ip=%s dur=%s",
+			c.roomHub.roomID, shortUserID(c.userID), c.ip,
+			time.Since(c.connectedAt).Truncate(time.Second))
 	}()
 	c.conn.SetReadLimit(4096)
 	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -451,6 +459,99 @@ const (
 )
 
 var sessionSecret []byte
+
+func isTruthyEnv(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func noCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientIP returns the originating client's address, looking through the
+// reverse proxy chain. Cloudflare sets CF-Connecting-IP to the true client.
+// Falls back to the first hop in X-Forwarded-For, then RemoteAddr.
+func clientIP(r *http.Request) string {
+	if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+		return cf
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// shortUserID returns the first 8 hex chars of a UUID for log compactness.
+func shortUserID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// statusRecorder wraps http.ResponseWriter so the access-log middleware
+// can observe the status code and body size, while still allowing the
+// gorilla/websocket upgrader to hijack the underlying connection.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (sr *statusRecorder) WriteHeader(status int) {
+	if sr.status == 0 {
+		sr.status = status
+	}
+	sr.ResponseWriter.WriteHeader(status)
+}
+
+func (sr *statusRecorder) Write(b []byte) (int, error) {
+	if sr.status == 0 {
+		sr.status = http.StatusOK
+	}
+	n, err := sr.ResponseWriter.Write(b)
+	sr.bytes += n
+	return n, err
+}
+
+func (sr *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := sr.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+func accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sr := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(sr, r)
+
+		userID := ""
+		if uid, ok := getUserIDFromRequest(r); ok {
+			userID = shortUserID(uid)
+		}
+		log.Printf("[http] %s %s %d %dB %s ip=%s user=%s",
+			r.Method, r.URL.RequestURI(), sr.status, sr.bytes,
+			time.Since(start).Truncate(time.Microsecond),
+			clientIP(r), userID)
+	})
+}
 
 func initSessionSecret() {
 	s := os.Getenv("SESSION_SECRET")
@@ -702,12 +803,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	roomHub := manager.getOrCreateHub(roomID)
 	client := &Client{
-		roomHub: roomHub,
-		conn:    conn,
-		userID:  userID,
-		send:    make(chan []byte, 256),
+		roomHub:     roomHub,
+		conn:        conn,
+		userID:      userID,
+		send:        make(chan []byte, 256),
+		ip:          clientIP(r),
+		connectedAt: time.Now(),
 	}
 	roomHub.register <- client
+	log.Printf("[ws connect] room=%s user=%s ip=%s", roomID, shortUserID(userID), client.ip)
 
 	go client.writePump()
 	go client.readPump()
@@ -834,7 +938,11 @@ func main() {
 
 	// Static files
 	fs := http.FileServer(http.Dir("static"))
-	mux.Handle("GET /static/", http.StripPrefix("/static/", fs))
+	staticHandler := http.StripPrefix("/static/", fs)
+	if isTruthyEnv("STATIC_NO_CACHE") {
+		staticHandler = noCacheMiddleware(staticHandler)
+	}
+	mux.Handle("GET /static/", staticHandler)
 
 	// Root redirect
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -859,5 +967,5 @@ func main() {
 	listenAddr := bindAddr + ":" + port
 
 	fmt.Printf("🎉 Emoji Chat server running on http://%s\n", listenAddr)
-	log.Fatal(http.ListenAndServe(listenAddr, mux))
+	log.Fatal(http.ListenAndServe(listenAddr, accessLog(mux)))
 }

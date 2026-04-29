@@ -65,6 +65,12 @@ function addRecentRoom(roomId, name) {
     localStorage.setItem('emoji_chat_recent_rooms', JSON.stringify(rooms));
 }
 
+function removeRecentRoom(roomId) {
+    const rooms = getRecentRooms().filter(r => r.id !== roomId);
+    localStorage.setItem('emoji_chat_recent_rooms', JSON.stringify(rooms));
+    renderRecentRooms();
+}
+
 function renderRecentRooms() {
     const rooms = getRecentRooms();
     const container = $('#recent-rooms');
@@ -88,8 +94,14 @@ function renderRecentRooms() {
                 <div class="recent-room-name">${room.name || '채팅방'}</div>
                 <div class="recent-room-id">${room.id}</div>
             </div>
-            <span class="recent-room-arrow">→</span>
+            <button class="recent-room-remove" type="button" title="목록에서 삭제" aria-label="목록에서 삭제">✕</button>
         `;
+        const removeBtn = item.querySelector('.recent-room-remove');
+        removeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            removeRecentRoom(room.id);
+        });
         list.appendChild(item);
     });
 }
