@@ -291,8 +291,8 @@ func (h *RoomHub) clientCount() int {
 
 func (c *Client) readPump() {
 	defer func() {
-		// If the hub already exited (idle teardown), done is closed and
-		// the unregister send would block forever — fall through cleanly.
+		// If the hub already exited (idle teardown), done is closed.
+		// We select on it so the send doesn't block forever on a dead hub.
 		select {
 		case c.roomHub.unregister <- c:
 		case <-c.roomHub.done:
@@ -960,13 +960,9 @@ func createSQLiteTables() error {
 
 // ─── Main ───────────────────────────────────────────────────────
 
-func main() {
-	loadDotenv()
-	initSessionSecret()
-	initDB()
-
-	manager = newHubManager()
-
+// buildMux assembles the router. Extracted from main so tests can wire up
+// the handlers without binding a real port.
+func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// API routes
@@ -994,6 +990,17 @@ func main() {
 		}
 		http.NotFound(w, r)
 	})
+
+	return mux
+}
+
+func main() {
+	loadDotenv()
+	initSessionSecret()
+	initDB()
+
+	manager = newHubManager()
+	mux := buildMux()
 
 	port := os.Getenv("PORT")
 	if port == "" {
