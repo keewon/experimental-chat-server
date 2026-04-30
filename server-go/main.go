@@ -74,14 +74,22 @@ type RoomHub struct {
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan []byte
-	stop       chan struct{}
-	manager    *HubManager
+	// done is closed by run() right before it exits. External senders
+	// (register/unregister/broadcast) select on it to avoid blocking on
+	// a hub whose run loop has already returned.
+	done    chan struct{}
+	manager *HubManager
 }
 
 // HubManager — 모든 RoomHub를 관리 (생성, 조회, 정리)
+//
+// hubs is a sync.Map keyed by roomID → *RoomHub. We chose sync.Map over a
+// plain map+mutex because: (1) the workload is read-heavy (each WS connect
+// is a Load, each new room is a single Store), (2) keys are disjoint per
+// goroutine, and (3) it lets a hub atomically detach itself on idle exit
+// via CompareAndDelete, closing the lookup-vs-teardown race.
 type HubManager struct {
-	hubs     map[string]*RoomHub
-	mu       sync.Mutex
+	hubs     sync.Map
 	idleTime time.Duration // 빈 방 정리까지 대기 시간
 }
 
@@ -125,74 +133,95 @@ const roomIdleTimeout = 1 * time.Hour
 
 func newHubManager() *HubManager {
 	return &HubManager{
-		hubs:     make(map[string]*RoomHub),
 		idleTime: roomIdleTimeout,
 	}
 }
 
-// getOrCreateHub — 방 Hub를 가져오거나, 없으면 새로 만들어 시작
-func (m *HubManager) getOrCreateHub(roomID string) *RoomHub {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if h, ok := m.hubs[roomID]; ok {
-		return h
-	}
-
-	h := &RoomHub{
+func newRoomHub(roomID string, m *HubManager) *RoomHub {
+	return &RoomHub{
 		roomID:     roomID,
 		clients:    make(map[*Client]bool),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan []byte, 256),
-		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 		manager:    m,
 	}
-	m.hubs[roomID] = h
-	go h.run()
-	log.Printf("RoomHub started: %s", roomID)
-	return h
 }
 
-// removeHub — HubManager에서 방 Hub 제거
-func (m *HubManager) removeHub(roomID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.hubs, roomID)
-	log.Printf("RoomHub removed: %s", roomID)
+// attachClient looks up (or creates) the hub for roomID and registers the
+// client with it. Returns the hub the client ended up in. If a freshly
+// found hub races with its own teardown, we transparently retry against a
+// new hub — callers never see a "dying" hub.
+func (m *HubManager) attachClient(roomID string, c *Client) *RoomHub {
+	for {
+		// Fast path — hub already exists.
+		if v, ok := m.hubs.Load(roomID); ok {
+			h := v.(*RoomHub)
+			if h.tryRegister(c) {
+				return h
+			}
+			// Hub closed its done channel between our Load and our send.
+			// Loop and create / find a fresh one.
+			continue
+		}
+
+		// Slow path — try to install a fresh hub.
+		h := newRoomHub(roomID, m)
+		actual, loaded := m.hubs.LoadOrStore(roomID, h)
+		if loaded {
+			// Lost the create race; another goroutine installed first.
+			existing := actual.(*RoomHub)
+			if existing.tryRegister(c) {
+				return existing
+			}
+			continue
+		}
+
+		// We own this hub now — start it and register.
+		go h.run()
+		log.Printf("RoomHub started: %s", roomID)
+		if h.tryRegister(c) {
+			return h
+		}
+		// Extremely unlikely: hub torn down before we could register.
+		// (Idle timer is 1h, so this won't happen in practice.)
+	}
 }
 
 // ─── RoomHub ────────────────────────────────────────────────────
 
+// tryRegister synchronously hands the client to the hub's run loop.
+// Returns false if the hub has already shut down — caller should retry
+// against a fresh hub via attachClient. Both branches of the select are
+// safe even if run() is mid-exit: once it closes done, this select fires
+// the done case instead of a register send that would have nobody to
+// receive it.
+func (h *RoomHub) tryRegister(c *Client) bool {
+	select {
+	case h.register <- c:
+		return true
+	case <-h.done:
+		return false
+	}
+}
+
 func (h *RoomHub) run() {
-	var idleTimer *time.Timer
-
-	// 시작 시 바로 idle 타이머 설정 (클라이언트 없이 생성될 수도 있으므로)
-	idleTimer = time.NewTimer(h.manager.idleTime)
-
-	defer func() {
-		idleTimer.Stop()
-		// 남은 클라이언트 모두 정리
-		for client := range h.clients {
-			close(client.send)
-		}
-		h.manager.removeHub(h.roomID)
-	}()
+	idleTimer := time.NewTimer(h.manager.idleTime)
+	defer idleTimer.Stop()
 
 	for {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			// 클라이언트가 들어왔으니 idle 타이머 중지
 			idleTimer.Stop()
 
 			count := len(h.clients)
-			msg := WSMessage{
+			h.broadcastMsg(WSMessage{
 				Type:        "join",
 				UserID:      client.userID,
 				OnlineCount: count,
-			}
-			h.broadcastMsg(msg)
+			})
 
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
@@ -201,14 +230,12 @@ func (h *RoomHub) run() {
 			}
 
 			count := len(h.clients)
-			msg := WSMessage{
+			h.broadcastMsg(WSMessage{
 				Type:        "leave",
 				UserID:      client.userID,
 				OnlineCount: count,
-			}
-			h.broadcastMsg(msg)
+			})
 
-			// 마지막 클라이언트가 나갔으면 idle 타이머 시작
 			if count == 0 {
 				idleTimer.Reset(h.manager.idleTime)
 			}
@@ -224,13 +251,19 @@ func (h *RoomHub) run() {
 			}
 
 		case <-idleTimer.C:
-			// 타이머 만료 — 아직 비어있으면 종료
 			if len(h.clients) == 0 {
-				return
+				// Detach atomically: only delete if the map still points at us.
+				// Then close `done` so any in-flight tryRegister/tryUnregister/
+				// broadcast sends unblock and (for register) retry.
+				if h.manager.hubs.CompareAndDelete(h.roomID, h) {
+					close(h.done)
+					log.Printf("RoomHub removed: %s", h.roomID)
+					return
+				}
+				// CompareAndDelete only fails if someone replaced our entry,
+				// which shouldn't happen with the current code paths. Stay alive.
+				idleTimer.Reset(h.manager.idleTime)
 			}
-
-		case <-h.stop:
-			return
 		}
 	}
 }
@@ -258,7 +291,12 @@ func (h *RoomHub) clientCount() int {
 
 func (c *Client) readPump() {
 	defer func() {
-		c.roomHub.unregister <- c
+		// If the hub already exited (idle teardown), done is closed and
+		// the unregister send would block forever — fall through cleanly.
+		select {
+		case c.roomHub.unregister <- c:
+		case <-c.roomHub.done:
+		}
 		c.conn.Close()
 		log.Printf("[ws disconnect] room=%s user=%s ip=%s dur=%s",
 			c.roomHub.roomID, shortUserID(c.userID), c.ip,
@@ -317,7 +355,12 @@ func (c *Client) readPump() {
 			CreatedAt: now,
 		}
 		data, _ := json.Marshal(broadcast)
-		c.roomHub.broadcast <- data
+		select {
+		case c.roomHub.broadcast <- data:
+		case <-c.roomHub.done:
+			// Hub already torn down — drop. The next read will likely fail
+			// and the pump will exit.
+		}
 	}
 }
 
@@ -801,16 +844,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roomHub := manager.getOrCreateHub(roomID)
 	client := &Client{
-		roomHub:     roomHub,
 		conn:        conn,
 		userID:      userID,
 		send:        make(chan []byte, 256),
 		ip:          clientIP(r),
 		connectedAt: time.Now(),
 	}
-	roomHub.register <- client
+	roomHub := manager.attachClient(roomID, client)
+	client.roomHub = roomHub
 	log.Printf("[ws connect] room=%s user=%s ip=%s", roomID, shortUserID(userID), client.ip)
 
 	go client.writePump()
