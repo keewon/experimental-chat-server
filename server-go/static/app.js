@@ -30,6 +30,7 @@ const btnCloseQR = $('#btn-close-qr');
 const btnDeleteRoom = $('#btn-delete-room');
 const btnCopyUrl = $('#btn-copy-url');
 const btnLoadMore = $('#btn-load-more');
+const btnReconnect = $('#btn-reconnect');
 const roomNameEl = $('#room-name');
 const onlineCountEl = $('#online-count');
 const emojiError = $('#emoji-error');
@@ -143,6 +144,7 @@ function showHome() {
 }
 
 async function showRoom(roomId) {
+    if (currentRoomId !== roomId) reconnectAttempts = 0;
     currentRoomId = roomId;
     oldestMessageId = null;
     showScreen(screenRoom);
@@ -245,8 +247,11 @@ async function loadMoreMessages() {
 
 // ─── WebSocket ──────────────────────────────────────
 
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 function connectWS(roomId) {
     disconnectWS();
+    hideReconnectButton();
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     // userId is no longer in the query string — the server reads it from the
@@ -273,10 +278,14 @@ function connectWS(roomId) {
 
     ws.onclose = () => {
         ws = null;
-        if (currentRoomId === roomId) {
-            showConnectionStatus('재연결 중...', 'error');
-            scheduleReconnect(roomId);
+        if (currentRoomId !== roomId) return;
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            showConnectionStatus('연결이 끊어졌어요', 'error');
+            showReconnectButton(roomId);
+            return;
         }
+        showConnectionStatus('재연결 중...', 'error');
+        scheduleReconnect(roomId);
     };
 
     ws.onerror = () => {
@@ -454,6 +463,22 @@ function showConnectionStatus(text, cls) {
 
 function hideConnectionStatus() {
     connectionStatus.style.display = 'none';
+    hideReconnectButton();
+}
+
+function showReconnectButton(roomId) {
+    btnReconnect.style.display = 'inline-block';
+    btnReconnect.onclick = () => {
+        if (currentRoomId !== roomId) return;
+        reconnectAttempts = 0;
+        hideReconnectButton();
+        connectWS(roomId);
+    };
+}
+
+function hideReconnectButton() {
+    btnReconnect.style.display = 'none';
+    btnReconnect.onclick = null;
 }
 
 // ─── Emoji Error UI ──────────────────────────────────

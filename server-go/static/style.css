@@ -665,6 +665,23 @@ body::before {
     background: #ff4444;
 }
 
+.btn-reconnect {
+    margin-left: 4px;
+    padding: 4px 12px;
+    background: var(--accent-1, #6c5ce7);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-full);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.15s;
+}
+
+.btn-reconnect:hover {
+    filter: brightness(1.15);
+}
+
 /* ─── Scrollbar ───────────────────────────────────── */
 
 ::-webkit-scrollbar {
