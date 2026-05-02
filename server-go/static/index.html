@@ -2,107 +2,167 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>😜 Emoji Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
+    <title>💬 Chat</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- ═══ HOME SCREEN ═══ -->
-<div id="screen-home" class="screen active">
-    <div class="home-wrapper">
-        <div class="home-hero">
-            <div class="hero-emoji-ring">
-                <span class="orbit-emoji" style="--i:0">😀</span>
-                <span class="orbit-emoji" style="--i:1">🎉</span>
-                <span class="orbit-emoji" style="--i:2">💬</span>
-                <span class="orbit-emoji" style="--i:3">🔥</span>
-                <span class="orbit-emoji" style="--i:4">✨</span>
-                <span class="orbit-emoji" style="--i:5">💖</span>
-                <span class="orbit-emoji" style="--i:6">🚀</span>
-                <span class="orbit-emoji" style="--i:7">🌈</span>
-            </div>
-            <h1 class="home-title">Emoji Chat</h1>
-            <p class="home-subtitle">말은 필요 없어, 이모지면 충분해</p>
-        </div>
-
-        <div class="home-actions">
-            <button id="btn-create-room" class="btn btn-primary">
-                <span class="btn-emoji">🎊</span>
-                새 채팅방 만들기
-            </button>
-
-            <div class="divider">
-                <span>또는</span>
-            </div>
-
-            <div class="join-input-group">
-                <input type="text" id="input-room-id" placeholder="채팅방 ID를 붙여넣기..." class="input-field">
-                <button id="btn-join-room" class="btn btn-secondary">참여 🚪</button>
-            </div>
-        </div>
-
-        <div id="recent-rooms" class="recent-rooms" style="display:none">
-            <h3>최근 방문한 채팅방</h3>
-            <div id="recent-rooms-list" class="recent-rooms-list"></div>
-        </div>
-    </div>
-</div>
-
-<!-- ═══ ROOM SCREEN ═══ -->
-<div id="screen-room" class="screen">
-    <header class="room-header">
-        <button id="btn-back" class="btn-icon" title="홈으로">←</button>
-        <div class="room-info">
-            <h2 id="room-name" class="room-name">🎉</h2>
-            <span id="online-count" class="online-badge">🟢 1</span>
-        </div>
-        <div class="room-header-actions">
-            <button id="btn-qr" class="btn-icon" title="QR 코드">📱</button>
-            <button id="btn-delete-room" class="btn-icon btn-danger-icon" title="방 삭제" style="display:none">🗑️</button>
-        </div>
-    </header>
-
-    <div id="chat-messages" class="chat-messages">
-        <div id="load-more-area" class="load-more-area" style="display:none">
-            <button id="btn-load-more" class="btn btn-ghost">이전 메시지 불러오기 ⬆️</button>
-        </div>
-    </div>
-
-    <div class="chat-input-area">
-        <div id="emoji-error" class="emoji-error" style="display:none">이모지만 입력할 수 있어요! 🙅</div>
+<!-- ═══ NICKNAME GATE ═══ -->
+<div id="screen-nickname" class="screen-fullscreen" style="display:none">
+    <div class="card">
+        <h2>👋 환영합니다</h2>
+        <p>채팅에 사용할 닉네임을 정해주세요.</p>
         <div class="input-row">
-            <input type="text" id="input-message" class="input-message" placeholder="이모지를 입력하세요... 😀" autocomplete="off">
-            <button id="btn-send" class="btn btn-send">🚀</button>
+            <input id="input-nickname" type="text" maxlength="20" placeholder="닉네임 (1~20자)" autocomplete="off">
+            <button id="btn-save-nickname" class="btn btn-primary">시작 🚀</button>
+        </div>
+        <p id="nickname-error" class="error-text" style="display:none"></p>
+    </div>
+</div>
+
+<!-- ═══ MAIN APP ═══ -->
+<div id="screen-app" class="app-shell" style="display:none">
+    <!-- ─── Sidebar ─── -->
+    <aside class="sidebar">
+        <header class="sidebar-header">
+            <div class="me-row">
+                <span class="me-name" id="me-name">--</span>
+                <button class="btn-link" id="btn-edit-nickname">변경</button>
+            </div>
+            <nav class="tab-bar">
+                <button class="tab-btn active" data-tab="my">내 채팅</button>
+                <button class="tab-btn" data-tab="browse">둘러보기</button>
+            </nav>
+        </header>
+
+        <!-- 내 채팅 -->
+        <div class="tab-pane" data-pane="my">
+            <ul id="my-rooms" class="room-list"></ul>
+            <button id="btn-create-room" class="btn btn-secondary btn-create">+ 새 채팅방</button>
+        </div>
+
+        <!-- 둘러보기 -->
+        <div class="tab-pane" data-pane="browse" style="display:none">
+            <ul id="public-rooms" class="room-list"></ul>
+            <button id="btn-refresh-public" class="btn btn-ghost">↻ 새로고침</button>
+        </div>
+    </aside>
+
+    <!-- ─── Main panel ─── -->
+    <main id="main-panel" class="main-panel">
+        <div id="empty-state" class="empty-state">
+            <p>왼쪽에서 채팅방을 선택하세요 👈</p>
+        </div>
+
+        <section id="room-view" class="room-view" style="display:none">
+            <header class="room-header">
+                <button id="btn-back-to-list" class="btn-icon mobile-only" title="채팅방 목록">←</button>
+                <div class="room-info">
+                    <h2 id="room-title" class="room-title">--</h2>
+                    <span id="room-meta" class="room-meta"></span>
+                </div>
+                <div class="room-actions">
+                    <button id="btn-show-members" class="btn-icon" title="멤버 보기">👥</button>
+                    <button id="btn-room-menu" class="btn-icon" title="메뉴">⋯</button>
+                </div>
+            </header>
+            <div id="messages" class="messages"></div>
+            <div id="emoji-error" class="emoji-error" style="display:none"></div>
+            <div class="composer">
+                <input id="msg-input" type="text" placeholder="메시지 입력..." autocomplete="off">
+                <button id="btn-send" class="btn btn-send">보내기</button>
+            </div>
+        </section>
+    </main>
+
+    <!-- ─── Members panel (right drawer) ─── -->
+    <aside id="members-panel" class="members-panel" style="display:none">
+        <header class="members-header">
+            <h3>멤버</h3>
+            <button id="btn-close-members" class="btn-icon">✕</button>
+        </header>
+        <ul id="members-list" class="members-list"></ul>
+    </aside>
+</div>
+
+<!-- ═══ MODALS ═══ -->
+
+<!-- Create room -->
+<div id="modal-create" class="modal" style="display:none">
+    <div class="modal-backdrop" data-close="modal-create"></div>
+    <div class="modal-card">
+        <h3>새 채팅방 만들기</h3>
+        <label>이름
+            <input id="create-name" type="text" maxlength="50" placeholder="채팅방 이름">
+        </label>
+        <label class="row">
+            <span>공개</span>
+            <select id="create-visibility">
+                <option value="public">공개 (둘러보기 노출)</option>
+                <option value="private">비공개 (초대 링크만)</option>
+            </select>
+        </label>
+        <label class="row">
+            <input type="checkbox" id="create-emoji-only">
+            <span>이모지만 허용</span>
+        </label>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" data-close="modal-create">취소</button>
+            <button id="btn-do-create" class="btn btn-primary">만들기</button>
         </div>
     </div>
 </div>
 
-<!-- ═══ QR MODAL ═══ -->
-<div id="modal-qr" class="modal" style="display:none">
-    <div class="modal-backdrop"></div>
-    <div class="modal-content">
-        <div class="modal-header">
-            <h3>📱 QR 코드로 초대하기</h3>
-            <button id="btn-close-qr" class="btn-icon">✕</button>
-        </div>
-        <div id="qr-code" class="qr-code-container"></div>
-        <p class="qr-hint">이 QR 코드를 스캔하면 채팅방에 참여할 수 있어요!</p>
-        <div class="qr-url-copy">
-            <input type="text" id="qr-url-display" class="input-field" readonly>
-            <button id="btn-copy-url" class="btn btn-secondary">복사 📋</button>
+<!-- Room menu -->
+<div id="modal-menu" class="modal" style="display:none">
+    <div class="modal-backdrop" data-close="modal-menu"></div>
+    <div class="modal-card">
+        <h3 id="menu-title">메뉴</h3>
+        <div id="menu-actions" class="menu-actions"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" data-close="modal-menu">닫기</button>
         </div>
     </div>
 </div>
 
-<!-- ═══ CONNECTION STATUS ═══ -->
+<!-- Invite display -->
+<div id="modal-invite" class="modal" style="display:none">
+    <div class="modal-backdrop" data-close="modal-invite"></div>
+    <div class="modal-card">
+        <h3>초대 링크</h3>
+        <p>이 링크를 공유하면 비공개 방에도 참여할 수 있어요.</p>
+        <div class="invite-row">
+            <input id="invite-url" readonly>
+            <button id="btn-copy-invite" class="btn btn-secondary">복사 📋</button>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" data-close="modal-invite">닫기</button>
+        </div>
+    </div>
+</div>
+
+<!-- Transfer / Leave -->
+<div id="modal-transfer" class="modal" style="display:none">
+    <div class="modal-backdrop" data-close="modal-transfer"></div>
+    <div class="modal-card">
+        <h3>방장 양도</h3>
+        <p>새 방장을 선택하세요. 양도 후 자동으로 이 방에서 나갑니다.</p>
+        <select id="transfer-target"></select>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" data-close="modal-transfer">취소</button>
+            <button id="btn-do-transfer" class="btn btn-primary">양도하고 나가기</button>
+        </div>
+    </div>
+</div>
+
+<!-- Connection status -->
 <div id="connection-status" class="connection-status" style="display:none">
     <span class="status-dot"></span>
     <span class="status-text">연결 중...</span>
-    <button id="btn-reconnect" class="btn-reconnect" type="button" style="display:none">재연결</button>
+    <button id="btn-reconnect" class="btn-reconnect" style="display:none">재연결</button>
 </div>
 
 <script src="/static/app.js"></script>

@@ -139,11 +139,18 @@ func TestAttachClient_ConcurrentWithIdleTeardown(t *testing.T) {
 				c := newTestClient("u")
 				h := manager.attachClient("room-x", c)
 
-				// The hub must broadcast the join we just triggered. If we
-				// landed in a dying hub, this would never come.
+				// Probe: send a broadcast and assert receipt. This proves
+				// the run loop is alive AND the client is in its clients
+				// set — the two things we'd lose if attachClient handed
+				// back a hub that was mid-teardown.
+				select {
+				case h.broadcast <- []byte("ping"):
+				case <-h.done:
+					errs <- fmtErr("attempt %d.%d: hub died before broadcast accepted", g, i)
+					return
+				}
 				select {
 				case <-c.send:
-					// Got join (or some broadcast) — alive.
 				case <-time.After(2 * time.Second):
 					errs <- fmtErr("attempt %d.%d: no broadcast from attached hub", g, i)
 					return
@@ -153,9 +160,7 @@ func TestAttachClient_ConcurrentWithIdleTeardown(t *testing.T) {
 				select {
 				case h.unregister <- c:
 				case <-h.done:
-					// Hub already gone; that's fine.
 				}
-				// Drain anything else we got.
 				drainSends(c.send, 5*time.Millisecond)
 			}
 		}(g)

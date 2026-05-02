@@ -33,36 +33,76 @@ var dbType string // "mysql" or "sqlite"
 
 // ─── Data Structures ────────────────────────────────────────────
 
+const (
+	RoomKindGroup = "group"
+	RoomKindLobby = "lobby"
+
+	RoomVisibilityPublic  = "public"
+	RoomVisibilityPrivate = "private"
+
+	RoleOwner  = "owner"
+	RoleMember = "member"
+
+	LobbyRoomID = "lobby"
+
+	GroupMemberCap = 100
+)
+
+type User struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at"`
+}
+
 type Room struct {
-	ID        string `json:"id"`
-	OwnerID   string `json:"owner_id"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at"`
+	ID         string  `json:"id"`
+	Kind       string  `json:"kind"`       // 'group' | 'lobby'
+	Visibility string  `json:"visibility"` // 'public' | 'private'
+	Name       string  `json:"name"`
+	EmojiOnly  bool    `json:"emoji_only"`
+	OwnerID    *string `json:"owner_id,omitempty"` // null for lobby
+	CreatedAt  string  `json:"created_at"`
+}
+
+type Member struct {
+	UserID      string `json:"user_id"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+	JoinedAt    string `json:"joined_at"`
 }
 
 type Message struct {
-	ID        int64  `json:"id"`
-	RoomID    string `json:"room_id"`
-	UserID    string `json:"user_id"`
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
+	ID          int64  `json:"id"`
+	RoomID      string `json:"room_id"`
+	UserID      string `json:"user_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Content     string `json:"content"`
+	CreatedAt   string `json:"created_at"`
 }
 
 type WSMessage struct {
 	Type        string `json:"type"`
+	RoomID      string `json:"room_id,omitempty"`
 	Content     string `json:"content,omitempty"`
 	ID          int64  `json:"id,omitempty"`
 	UserID      string `json:"user_id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
 	CreatedAt   string `json:"created_at,omitempty"`
-	OnlineCount int    `json:"online_count,omitempty"`
+	Code        string `json:"code,omitempty"`
 	Message     string `json:"message,omitempty"`
+	OnlineCount int    `json:"online_count,omitempty"` // used by single-room hub broadcasts; revisit in step 3
 }
 
 type Client struct {
-	roomHub     *RoomHub
 	conn        *websocket.Conn
 	userID      string
-	send        chan []byte
+	displayName string
+
+	send chan []byte
+
+	hubs   map[string]*RoomHub
+	hubsMu sync.Mutex
+
 	ip          string
 	connectedAt time.Time
 }
@@ -207,36 +247,29 @@ func (h *RoomHub) tryRegister(c *Client) bool {
 }
 
 func (h *RoomHub) run() {
+	// Lobby is permanent — never let its idle timer fire teardown.
 	idleTimer := time.NewTimer(h.manager.idleTime)
+	if h.roomID == LobbyRoomID {
+		idleTimer.Stop()
+	}
 	defer idleTimer.Stop()
 
 	for {
 		select {
 		case client := <-h.register:
+			// Multi-room model: connection-level join is no longer broadcast;
+			// the REST member_join event is what membership-aware UIs care about.
 			h.clients[client] = true
-			idleTimer.Stop()
-
-			count := len(h.clients)
-			h.broadcastMsg(WSMessage{
-				Type:        "join",
-				UserID:      client.userID,
-				OnlineCount: count,
-			})
-
-		case client := <-h.unregister:
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				close(client.send)
+			if h.roomID != LobbyRoomID {
+				idleTimer.Stop()
 			}
 
-			count := len(h.clients)
-			h.broadcastMsg(WSMessage{
-				Type:        "leave",
-				UserID:      client.userID,
-				OnlineCount: count,
-			})
-
-			if count == 0 {
+		case client := <-h.unregister:
+			// We do NOT close client.send here — that channel is shared
+			// across all the hubs this client is in, and is owned by the
+			// connection's readPump (which closes it exactly once on exit).
+			delete(h.clients, client)
+			if len(h.clients) == 0 && h.roomID != LobbyRoomID {
 				idleTimer.Reset(h.manager.idleTime)
 			}
 
@@ -245,64 +278,61 @@ func (h *RoomHub) run() {
 				select {
 				case client.send <- data:
 				default:
-					close(client.send)
+					// Slow client; drop from this hub's set and close the
+					// underlying connection so readPump tears everything down.
 					delete(h.clients, client)
+					if client.conn != nil {
+						client.conn.Close()
+					}
 				}
 			}
 
 		case <-idleTimer.C:
+			if h.roomID == LobbyRoomID {
+				continue
+			}
 			if len(h.clients) == 0 {
-				// Detach atomically: only delete if the map still points at us.
-				// Then close `done` so any in-flight tryRegister/tryUnregister/
-				// broadcast sends unblock and (for register) retry.
 				if h.manager.hubs.CompareAndDelete(h.roomID, h) {
 					close(h.done)
 					log.Printf("RoomHub removed: %s", h.roomID)
 					return
 				}
-				// CompareAndDelete only fails if someone replaced our entry,
-				// which shouldn't happen with the current code paths. Stay alive.
 				idleTimer.Reset(h.manager.idleTime)
 			}
 		}
 	}
 }
 
-func (h *RoomHub) broadcastMsg(msg WSMessage) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return
-	}
-	for client := range h.clients {
-		select {
-		case client.send <- data:
-		default:
-			close(client.send)
-			delete(h.clients, client)
-		}
-	}
-}
-
-func (h *RoomHub) clientCount() int {
-	return len(h.clients)
-}
-
 // ─── WebSocket Client Pumps ─────────────────────────────────────
 
 func (c *Client) readPump() {
 	defer func() {
-		// If the hub already exited (idle teardown), done is closed.
-		// We select on it so the send doesn't block forever on a dead hub.
-		select {
-		case c.roomHub.unregister <- c:
-		case <-c.roomHub.done:
+		// Snapshot all hubs we're attached to (under lock), then unregister
+		// from each. send is owned by this goroutine — close it exactly
+		// once here so writePump exits cleanly.
+		c.hubsMu.Lock()
+		hubs := make([]*RoomHub, 0, len(c.hubs))
+		for _, h := range c.hubs {
+			hubs = append(hubs, h)
 		}
+		c.hubs = nil
+		c.hubsMu.Unlock()
+
+		for _, h := range hubs {
+			select {
+			case h.unregister <- c:
+			case <-h.done:
+			}
+		}
+		clientRegistry.remove(c)
+		close(c.send)
 		c.conn.Close()
-		log.Printf("[ws disconnect] room=%s user=%s ip=%s dur=%s",
-			c.roomHub.roomID, shortUserID(c.userID), c.ip,
+		log.Printf("[ws disconnect] user=%s ip=%s dur=%s",
+			shortUserID(c.userID), c.ip,
 			time.Since(c.connectedAt).Truncate(time.Second))
 	}()
-	c.conn.SetReadLimit(4096)
+
+	c.conn.SetReadLimit(8192)
 	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	c.conn.SetPongHandler(func(string) error {
 		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -310,57 +340,89 @@ func (c *Client) readPump() {
 	})
 
 	for {
-		_, rawMsg, err := c.conn.ReadMessage()
+		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
-			break
+			return
 		}
-
-		var incoming WSMessage
-		if err := json.Unmarshal(rawMsg, &incoming); err != nil {
+		var inc wsIncoming
+		if err := json.Unmarshal(raw, &inc); err != nil {
 			continue
 		}
-
-		if incoming.Type != "message" {
+		if inc.Type != WSTypeMsg {
 			continue
 		}
+		c.handleIncomingMsg(inc)
+	}
+}
 
-		content := strings.TrimSpace(incoming.Content)
-		if content == "" {
-			continue
-		}
+const messageMaxRunes = 1000
 
-		if !isEmojiOnly(content) {
-			errMsg := WSMessage{Type: "error", Message: "emoji only! 🙅"}
-			data, _ := json.Marshal(errMsg)
-			c.send <- data
-			continue
-		}
+func (c *Client) handleIncomingMsg(inc wsIncoming) {
+	content := strings.TrimSpace(inc.Content)
+	if content == "" || inc.RoomID == "" {
+		return
+	}
+	if utf8.RuneCountInString(content) > messageMaxRunes {
+		c.sendError("too_long", "메시지가 너무 길어요")
+		return
+	}
 
-		now := time.Now().UTC().Format(time.RFC3339)
-		result, err := db.Exec(
-			"INSERT INTO messages (room_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
-			c.roomHub.roomID, c.userID, content, now,
-		)
-		if err != nil {
-			log.Printf("DB insert error: %v", err)
-			continue
-		}
+	_, _, isMember, err := roomMembership(inc.RoomID, c.userID)
+	if err != nil || !isMember {
+		c.sendError("not_member", "이 방의 멤버가 아닙니다")
+		return
+	}
 
-		msgID, _ := result.LastInsertId()
-		broadcast := WSMessage{
-			Type:      "message",
-			ID:        msgID,
-			UserID:    c.userID,
-			Content:   content,
-			CreatedAt: now,
-		}
-		data, _ := json.Marshal(broadcast)
-		select {
-		case c.roomHub.broadcast <- data:
-		case <-c.roomHub.done:
-			// Hub already torn down — drop. The next read will likely fail
-			// and the pump will exit.
-		}
+	room, err := getRoom(inc.RoomID)
+	if err != nil {
+		return
+	}
+	if room.EmojiOnly && !isEmojiOnly(content) {
+		c.sendError("emoji_only", "이 방은 이모지만 보낼 수 있어요 🙅")
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := db.Exec(
+		"INSERT INTO messages (room_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
+		inc.RoomID, c.userID, content, now,
+	)
+	if err != nil {
+		log.Printf("DB insert error: %v", err)
+		return
+	}
+	msgID, _ := res.LastInsertId()
+
+	c.hubsMu.Lock()
+	displayName := c.displayName
+	h := c.hubs[inc.RoomID]
+	c.hubsMu.Unlock()
+	if h == nil {
+		return
+	}
+
+	evt := wsMsgEvent{
+		Type:        WSTypeMsg,
+		RoomID:      inc.RoomID,
+		ID:          msgID,
+		UserID:      c.userID,
+		DisplayName: displayName,
+		Content:     content,
+		CreatedAt:   now,
+	}
+	data, _ := json.Marshal(evt)
+
+	select {
+	case h.broadcast <- data:
+	case <-h.done:
+	}
+}
+
+func (c *Client) sendError(code, msg string) {
+	data, _ := json.Marshal(wsErrorEvent{Type: WSTypeError, Code: code, Message: msg})
+	select {
+	case c.send <- data:
+	default:
 	}
 }
 
@@ -688,127 +750,26 @@ func handleSession(w http.ResponseWriter, r *http.Request) {
 
 // ─── HTTP Handlers ──────────────────────────────────────────────
 
-func handleCreateRoom(w http.ResponseWriter, r *http.Request) {
-	userID, ok := requireUserID(w, r)
-	if !ok {
-		return
-	}
-
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	roomID := uuid.New().String()
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
-		"INSERT INTO rooms (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)",
-		roomID, userID, req.Name, now,
-	)
-	if err != nil {
-		log.Printf("DB error creating room: %v", err)
-		jsonError(w, "failed to create room", http.StatusInternalServerError)
-		return
-	}
-
-	room := Room{ID: roomID, OwnerID: userID, Name: req.Name, CreatedAt: now}
-	jsonResponse(w, room, http.StatusCreated)
-}
-
-func handleGetRoom(w http.ResponseWriter, r *http.Request) {
-	roomID := r.PathValue("id")
-	if roomID == "" {
-		jsonError(w, "room id required", http.StatusBadRequest)
-		return
-	}
-
-	var room Room
-	err := db.QueryRow(
-		"SELECT id, owner_id, name, created_at FROM rooms WHERE id = ?", roomID,
-	).Scan(&room.ID, &room.OwnerID, &room.Name, &room.CreatedAt)
-	if err == sql.ErrNoRows {
-		jsonError(w, "room not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		jsonError(w, "database error", http.StatusInternalServerError)
-		return
-	}
-
-	jsonResponse(w, room, http.StatusOK)
-}
-
-func handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
-	userID, ok := requireUserID(w, r)
-	if !ok {
-		return
-	}
-	roomID := r.PathValue("id")
-
-	var ownerID string
-	err := db.QueryRow("SELECT owner_id FROM rooms WHERE id = ?", roomID).Scan(&ownerID)
-	if err == sql.ErrNoRows {
-		jsonError(w, "room not found", http.StatusNotFound)
-		return
-	}
-	if ownerID != userID {
-		jsonError(w, "only the room owner can delete", http.StatusForbidden)
-		return
-	}
-
-	db.Exec("DELETE FROM rooms WHERE id = ?", roomID)
-	w.WriteHeader(http.StatusNoContent)
-}
+// NOTE: Room CRUD handlers (create/get/delete/leave/transfer/etc.) are
+// implemented in step 2 of the messenger redesign. The old single-room
+// emoji-chat REST surface has been removed deliberately; the new endpoints
+// will replace it.
 
 func handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	roomID := r.PathValue("id")
-	limitStr := r.URL.Query().Get("limit")
-	beforeStr := r.URL.Query().Get("before")
-
 	limit := 50
-	if limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 200 {
-			limit = l
-		}
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 200 {
+		limit = l
 	}
-
-	var rows *sql.Rows
-	var err error
-	if beforeStr != "" {
-		before, _ := strconv.ParseInt(beforeStr, 10, 64)
-		rows, err = db.Query(
-			"SELECT id, room_id, user_id, content, created_at FROM messages WHERE room_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
-			roomID, before, limit,
-		)
-	} else {
-		rows, err = db.Query(
-			"SELECT id, room_id, user_id, content, created_at FROM messages WHERE room_id = ? ORDER BY id DESC LIMIT ?",
-			roomID, limit,
-		)
+	var before int64
+	if b, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64); err == nil {
+		before = b
 	}
+	messages, err := listMessages(roomID, before, limit)
 	if err != nil {
 		jsonError(w, "database error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-
-	messages := make([]Message, 0)
-	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.ID, &m.RoomID, &m.UserID, &m.Content, &m.CreatedAt); err != nil {
-			continue
-		}
-		messages = append(messages, m)
-	}
-
-	// Reverse to chronological order
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-
 	jsonResponse(w, map[string]any{"messages": messages}, http.StatusOK)
 }
 
@@ -824,17 +785,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
-	roomID := r.PathValue("roomId")
-	if roomID == "" {
-		http.Error(w, "missing roomId", http.StatusBadRequest)
+	user, err := ensureUser(userID)
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
-
-	// Verify room exists
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM rooms WHERE id = ?", roomID).Scan(&count)
-	if count == 0 {
-		http.Error(w, "room not found", http.StatusNotFound)
+	if user.DisplayName == "" {
+		http.Error(w, "display_name required", http.StatusForbidden)
 		return
 	}
 
@@ -847,13 +804,38 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	client := &Client{
 		conn:        conn,
 		userID:      userID,
+		displayName: user.DisplayName,
 		send:        make(chan []byte, 256),
+		hubs:        make(map[string]*RoomHub),
 		ip:          clientIP(r),
 		connectedAt: time.Now(),
 	}
-	roomHub := manager.attachClient(roomID, client)
-	client.roomHub = roomHub
-	log.Printf("[ws connect] room=%s user=%s ip=%s", roomID, shortUserID(userID), client.ip)
+	clientRegistry.add(client)
+
+	rooms, err := myRoomsForSnapshot(userID)
+	if err != nil {
+		log.Printf("snapshot build: %v", err)
+	}
+
+	// Push the snapshot first so clients always see "what rooms am I in"
+	// before any live message lands. The send buffer (256) is large enough
+	// that this push cannot block on a fresh connection.
+	snap := wsSnapshot{Type: WSTypeSnapshot, Me: user, Rooms: rooms}
+	if data, err := json.Marshal(snap); err == nil {
+		client.send <- data
+	}
+
+	// Attach to every room the user is a member of (lobby included). After
+	// this point, live broadcasts can flow into client.send.
+	for _, e := range rooms {
+		h := manager.attachClient(e.Room.ID, client)
+		client.hubsMu.Lock()
+		client.hubs[e.Room.ID] = h
+		client.hubsMu.Unlock()
+	}
+
+	log.Printf("[ws connect] user=%s ip=%s rooms=%d",
+		shortUserID(userID), client.ip, len(rooms))
 
 	go client.writePump()
 	go client.readPump()
@@ -916,6 +898,9 @@ func initDB() {
 		if err := createSQLiteTables(); err != nil {
 			log.Fatalf("Failed to create SQLite tables: %v", err)
 		}
+		if err := seedLobby(); err != nil {
+			log.Fatalf("Failed to seed lobby: %v", err)
+		}
 		log.Printf("Connected to SQLite (%s)", dsn)
 
 	default:
@@ -924,37 +909,81 @@ func initDB() {
 }
 
 func createSQLiteTables() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS rooms (
-			id         TEXT NOT NULL PRIMARY KEY,
-			owner_id   TEXT NOT NULL,
-			name       TEXT NOT NULL DEFAULT '',
-			created_at TEXT NOT NULL DEFAULT (datetime('now'))
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create rooms table: %w", err)
-	}
-
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS messages (
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id           TEXT PRIMARY KEY,
+			display_name TEXT NOT NULL,
+			created_at   TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS rooms (
+			id           TEXT PRIMARY KEY,
+			kind         TEXT NOT NULL,
+			visibility   TEXT NOT NULL,
+			name         TEXT NOT NULL DEFAULT '',
+			emoji_only   INTEGER NOT NULL DEFAULT 0,
+			owner_id     TEXT,
+			created_at   TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS room_members (
+			room_id    TEXT NOT NULL,
+			user_id    TEXT NOT NULL,
+			role       TEXT NOT NULL DEFAULT 'member',
+			joined_at  TEXT NOT NULL,
+			hidden     INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (room_id, user_id),
+			FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS messages (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
 			room_id    TEXT NOT NULL,
 			user_id    TEXT NOT NULL,
 			content    TEXT NOT NULL,
-			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			created_at TEXT NOT NULL,
 			FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create messages table: %w", err)
+		)`,
+		`CREATE TABLE IF NOT EXISTS invites (
+			token      TEXT PRIMARY KEY,
+			room_id    TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			revoked_at TEXT,
+			FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_rooms_kind_visibility ON rooms(kind, visibility)`,
 	}
 
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id, created_at)`)
-	if err != nil {
-		return fmt.Errorf("create index: %w", err)
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return fmt.Errorf("schema: %w (stmt: %s)", err, firstLine(s))
+		}
 	}
+	return nil
+}
 
+func firstLine(s string) string {
+	for i, r := range s {
+		if r == '\n' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// seedLobby ensures the singleton lobby room exists. Idempotent — safe to
+// call on every start. Membership is implicit (every user is a member),
+// so we do not seed room_members here.
+func seedLobby() error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(`
+		INSERT INTO rooms (id, kind, visibility, name, emoji_only, owner_id, created_at)
+		SELECT ?, ?, ?, ?, 0, NULL, ?
+		WHERE NOT EXISTS (SELECT 1 FROM rooms WHERE id = ?)
+	`, LobbyRoomID, RoomKindLobby, RoomVisibilityPublic, "🏛️ 로비", now, LobbyRoomID)
+	if err != nil {
+		return fmt.Errorf("seed lobby: %w", err)
+	}
 	return nil
 }
 
@@ -965,14 +994,34 @@ func createSQLiteTables() error {
 func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// API routes
+	// Session / config
+	mux.HandleFunc("GET /api/session", handleSession)
+	mux.HandleFunc("GET /api/config", handleGetConfig)
+
+	// Profile
+	mux.HandleFunc("GET /api/me", handleGetMe)
+	mux.HandleFunc("PUT /api/me", handlePutMe)
+
+	// Rooms — note: literal /api/rooms/public is more specific than the
+	// {id} pattern so Go's mux routes correctly without collision.
+	mux.HandleFunc("GET /api/rooms/public", handleGetPublicRooms)
 	mux.HandleFunc("POST /api/rooms", handleCreateRoom)
 	mux.HandleFunc("GET /api/rooms/{id}", handleGetRoom)
-	mux.HandleFunc("DELETE /api/rooms/{id}", handleDeleteRoom)
+	mux.HandleFunc("PATCH /api/rooms/{id}", handlePatchRoom)
+	mux.HandleFunc("POST /api/rooms/{id}/transfer", handleTransferOwner)
+	mux.HandleFunc("POST /api/rooms/{id}/leave", handleLeaveRoom)
+	mux.HandleFunc("POST /api/rooms/{id}/hide", handleHideRoom)
+	mux.HandleFunc("POST /api/rooms/{id}/unhide", handleUnhideRoom)
+	mux.HandleFunc("POST /api/rooms/{id}/join", handleJoinRoom)
+	mux.HandleFunc("POST /api/rooms/{id}/invite", handleCreateInvite)
+	mux.HandleFunc("GET /api/rooms/{id}/members", handleGetMembers)
 	mux.HandleFunc("GET /api/rooms/{id}/messages", handleGetMessages)
-	mux.HandleFunc("GET /api/config", handleGetConfig)
-	mux.HandleFunc("GET /api/session", handleSession)
-	mux.HandleFunc("GET /ws/{roomId}", handleWebSocket)
+
+	// Invite preview
+	mux.HandleFunc("GET /api/invites/{token}", handleGetInvite)
+
+	// WebSocket — single multiplexed connection per user.
+	mux.HandleFunc("GET /ws", handleWebSocket)
 
 	// Static files
 	fs := http.FileServer(http.Dir("static"))
